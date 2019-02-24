@@ -1,4 +1,4 @@
-import java.io.{BufferedOutputStream, FileOutputStream, InputStream, OutputStream}
+import java.io._
 import java.net.{HttpURLConnection, URL}
 import java.time.YearMonth
 import java.time.format.DateTimeFormatter
@@ -11,57 +11,66 @@ import org.apache.spark.{SparkConf, SparkContext}
 /**
   * Created by Aneesh on 22/02/2019.
   */
+
 object weatherQueryTool extends App {
 
   //Setup new Spark instance
   val conf = new SparkConf().setAppName("weatherdata").setMaster("local")
   val sc: SparkContext = new SparkContext(conf)
+
   val dtf = DateTimeFormatter.ofPattern("yyyy-MM")
+  val weatherFilesDirectory: String = "src/main/resources/weather_data/"
+  val resultsDirectory: String = "src/main/resources/results/"
+  val txtExtension = ".txt"
 
   //manually list out locations which are being queried
-  val fileDirectory: String = "src/main/resources/weather_data/"
-  val txtExtension = ".txt"
   val locations: List[String] = List("aberporth", "armagh", "ballypatrick", "bradford",
     "braemar", "camborne", "cambridge", "cardiff", "chivenor", "cwmystwyth", "dunstaffnage", "durham", "eastbourne",
     "eskdalemuir", "heathrow", "hurn", "lerwick", "leuchars", "lowestoft", "manston", "nairn", "newtonrigg",
     "oxford", "paisley", "ringway", "rossonwye", "shawbury", "sheffield", "southampton", "stornoway", "suttonbonington",
     "tiree", "valley", "waddington", "whitby", "wickairport", "yeovilton")
 
+  //download data from the internet and parse into Spark RDD
+  downloadWeatherFiles(locations, weatherFilesDirectory)
+  val data = createSparkRDD(locations)
 
-  downloadFiles(locations)
+  //create results directory
+  val resultsDir = new java.io.File(resultsDirectory)
+  if (!resultsDir.exists()) resultsDir.mkdirs
 
-//create spark dataset
-  val data: RDD[weatherInstance] = sc.parallelize(locations.map(x => (x,removeHeader(x)))
-      .flatMap(z => z._2.map(record => cleanAndTokenizeEntry(z._1, record)).filter(b => b.length > 6)
-        .map(a => toWeatherInstance(z._1,a))))
+  //Query 1: Amount of time each station has been/ was online for
+  val file1 = new File(resultsDirectory + "query1.txt")
+  val bw1 = new BufferedWriter(new FileWriter(file1))
+  queryOne(data).foreach(pair => bw1.write(pair._1 + " " + pair._2 + " years\n"))
+  bw1.close()
 
-  //make this more spark-y
+  //Query 2: Total rainfall in one location
+  val file2 = new File(resultsDirectory + "query2.txt")
+  val bw2 = new BufferedWriter(new FileWriter(file2))
+  queryTwo(data).foreach(pair => bw2.write(pair._1 + " got " + pair._2.getOrElse(0.0) + " cm rain\n"))
+  bw2.close()
 
-  //Query 1:
-  //data.groupBy(_.location).map(entry => (entry._1, entry._2.minBy(_.yearMonth).yearMonth.until(entry._2.maxBy(_.yearMonth.getYear).yearMonth, ChronoUnit.YEARS))).sortBy(-_._2).foreach(pair => println(pair._1 + " " + pair._2 + " years"))
+  //Query 3: Month and year in which each location got max rainfall
+  val file3 = new File(resultsDirectory + "query3.txt")
+  val bw3 = new BufferedWriter(new FileWriter(file3))
+  queryThree(data).foreach(pair => bw3.write(pair._1 + " got " + pair._2._2 + " cm rainfall in " + pair._2._1 + "\n"))
+  bw3.close()
 
-  //Query 2:
-  //data.groupBy(_.location).map(a => (a._1, a._2.reduce(_.weatherStats.rain.getOrElse(0.0) + _.weatherStats.rain.getOrElse(0.0)))).sortBy(-_._2).foreach(c => println(c._1 + " " + c._2 + "cm rain"))
-  //data.map(entry => (entry.location, entry.weatherStats.rain)).reduceByKey((a,b) => Some(a.getOrElse(0.0) + b.getOrElse(0.0))).sortBy(-_._2.get).collect().foreach(pair => println(pair._1 + " got " + pair._2.get + " cm rain"))
-
-  //Query 2b:
-  //data.map(entry => (entry.location, entry.weatherStats.sunHours)).reduceByKey((a,b) => Some(a.getOrElse(0.0) + b.getOrElse(0.0))).sortBy(-_._2.get).collect().foreach(pair => println(pair._1 + " got " + pair._2.get + " hours of sunshine"))
-
-  //Query 3a
-  data.map(entry => (entry.location, (entry.yearMonth, entry.weatherStats.rain.getOrElse(0.0)))).reduceByKey{case ((a,b),(c,d)) => (if (math.max(b,d) == b) a else c,math.max(b,d))}.collect().foreach(pair => println(pair._1 + " got " + pair._2._2 + " rainfall in " + pair._2._1 ))
-
-  //Query 4:
-  //data.filter(_.yearMonth.getMonthValue == 5).map(entry => (entry.location, entry.weatherStats.tmax)).reduceByKey((a,b) => Some(a.getOrElse(0.0) + b.getOrElse(0.0))).sortBy(-_._2.get).collect().foreach(pair => println(pair._1 + " got" + pair._2.get + " degrees heat"))
+  //Query 4: Average of stats in May across all locations - done for sunshine hours, can be changed
+  val file4 = new File(resultsDirectory + "query4.txt")
+  val bw4 = new BufferedWriter(new FileWriter(file4))
+  queryFour(data).foreach(pair => bw4.write(pair._1 + " averaged " + pair._2+ " hours of sunshine \n"))
+  bw4.close()
 
   //create directory to host weather data files, and download the above files into it
-  def downloadFiles(locations: List[String]) = {
-    new java.io.File(fileDirectory).mkdirs
+  def downloadWeatherFiles(locations: List[String], destination: String, fileExtension: String = txtExtension) = {
+    new java.io.File(destination).mkdirs
     locations.map(location => {
-      val url = new URL("https://www.metoffice.gov.uk/pub/data/weather/uk/climate/stationdata/" + location + "data" + txtExtension)
+      val url = new URL("https://www.metoffice.gov.uk/pub/data/weather/uk/climate/stationdata/" + location + "data" + fileExtension)
       val connection = url.openConnection().asInstanceOf[HttpURLConnection]
       connection.setRequestMethod("GET")
       val in: InputStream = connection.getInputStream
-      val fileToDownloadAs = new java.io.File(fileDirectory + location + txtExtension)
+      val fileToDownloadAs = new java.io.File(destination + location + fileExtension)
       val out: OutputStream = new BufferedOutputStream(new FileOutputStream(fileToDownloadAs))
       val byteArray = Stream.continually(in.read).takeWhile(-1 !=).map(_.toByte).toArray
       out.write(byteArray)
@@ -70,45 +79,82 @@ object weatherQueryTool extends App {
     })
   }
 
-  def removeHeader(location: String) : List[String] = {
-    var i = 0 // This has to change
-      while(!scala.io.Source.fromFile(fileDirectory + location + txtExtension).getLines().toList(i).trim.startsWith("yyyy")){
-        i = i + 1
+  def getFileAndRemoveHeader(weatherFilesDirectory: String, location: String) : List[String] = {
+    var index = 0
+    val lines = scala.io.Source.fromFile(weatherFilesDirectory + location + txtExtension).getLines.toList
+      while(!lines(index).trim.startsWith("yyyy")){
+        index += 1
       }
-    scala.io.Source.fromFile(fileDirectory + location + txtExtension).getLines.drop(i+2).toList
+    lines.drop(index+2)
   }
 
-  def cleanAndTokenizeEntry(location: String, uncleanEntry: String) : List[String] ={
+  def cleanAndTokenizeEntry(uncleanEntry: String) : List[String] ={
     uncleanEntry.trim.split(" ").toList.map(_.trim).filter(_ != "").map(_.replaceAll("(\\*|\\$|#)", "")).map(_.replace("Provisional", ""))
-    //if (cleanedOuput.length < 7) println("Malformed record in  " + location + " = " + uncleanEntry)
-
   }
 
-  def toWeatherInstance(fileName: String, weatherData: List[String]) : weatherInstance = {
+  def toWeatherInstance(fileName: String, weatherData: List[String], dtf: DateTimeFormatter = dtf) : weatherInstance = {
       weatherInstance(location = fileName,
-        yearMonth = YearMonth.parse(weatherData.head + "-" + (if (weatherData(1).length < 2) "0" + weatherData(1) else weatherData(1)), dtf), //TODO:probably should catch this
+        yearMonth = YearMonth.parse(weatherData.head + "-" + (if (weatherData(1).length < 2) "0" + weatherData(1) else weatherData(1)), dtf),
         weatherStats = new weatherStats(
-          tmax = numberOrNone(weatherData(2)),
-          tmin = numberOrNone(weatherData(3)),
-          afDays = numberOrNone(weatherData(4)),
-          rain = numberOrNone(weatherData(5)),
-          sunHours = numberOrNone(weatherData(6))))
+          tmax = doubleToOption(weatherData(2)),
+          tmin = doubleToOption(weatherData(3)),
+          afDays = doubleToOption(weatherData(4)),
+          rain = doubleToOption(weatherData(5)),
+          sunHours = if (weatherData.size > 6) doubleToOption(weatherData(6)) else None))
   }
 
-  def numberOrNone(number: String): Option[Double] = {
+  def doubleToOption(number: String): Option[Double] = {
     try {
       if (number == "---") None else Some(number.toDouble)
     } catch {
       case error: NumberFormatException => {
-        //println("Failed to parse " + number)
         None
       }
       case error: Exception => {
-        //println("Failed to parse - " + number)
         error.printStackTrace()
         throw error
       }
     }
+  }
+
+  def createSparkRDD(locations: List[String], weatherFilesDirectory: String = weatherFilesDirectory, dtf: DateTimeFormatter = dtf, sc: SparkContext = sc) : RDD[weatherInstance] = {
+    //create spark dataset
+    sc.parallelize(
+      locations.map(location => (location,getFileAndRemoveHeader(weatherFilesDirectory, location))) //retrieves the location file, and removes header lines
+        .flatMap(locationAndWeatherData => locationAndWeatherData._2.map(record => cleanAndTokenizeEntry(record)) //returns tokenized, cleaned records along with the station name
+        .filter(dataInstance => dataInstance.length > 5) //filters out malformed data instances but not incomplete
+        .map(cleanedRecord => toWeatherInstance(locationAndWeatherData._1,cleanedRecord, dtf)))) //returns a RDD of weather instances
+  }
+
+  def createResultFile(directory: String, queryName: String) : File = {
+    val resultsDir = new java.io.File(directory)
+    if (!resultsDir.exists()) resultsDir.mkdirs
+    new File(directory + queryName + txtExtension)
+  }
+
+  def queryOne(data: RDD[weatherInstance]) : RDD[(String, Long)] = {
+    data.groupBy(_.location)
+      .map(entry => (entry._1, entry._2.minBy(_.yearMonth).yearMonth.until(entry._2.maxBy(_.yearMonth.getYear).yearMonth, ChronoUnit.YEARS)))
+      .sortBy(-_._2)
+  }
+
+  def queryTwo(data: RDD[weatherInstance]) : RDD[(String, Option[Double])] = {
+    data.map(entry => (entry.location, entry.weatherStats.rain))
+      .reduceByKey((a,b) => Some(a.getOrElse(0.0) + b.getOrElse(0.0)))
+      .sortBy(-_._2.get)
+  }
+
+  def queryThree(data: RDD[weatherInstance]) : RDD[(String, (YearMonth, Double))] = {
+    data.map(entry => (entry.location, (entry.yearMonth, entry.weatherStats.rain.getOrElse(0.0))))
+      .reduceByKey{case ((a,b),(c,d)) => (if (math.max(b,d) == b) a else c,math.max(b,d))}
+  }
+
+  def queryFour(data: RDD[weatherInstance]): RDD[(Int, Double)] = {
+    data.filter(_.yearMonth.getMonthValue == 5) //Filter out May records
+      .map(entry => (entry.yearMonth.getYear(), (entry.weatherStats.sunHours.getOrElse(0.0), if (entry.weatherStats.sunHours.isDefined) 1 else 0)))
+      .reduceByKey{case ((a,b),(c,d)) => (a+c, b+d)}
+      .map(value => (value._1, value._2._1/value._2._2))
+      .sortBy(-_._2)
   }
 
 }
