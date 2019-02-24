@@ -3,7 +3,7 @@ import java.net.{HttpURLConnection, URL}
 import java.time.YearMonth
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
-
+import org.apache.commons.logging.{Log, LogFactory}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.{SparkConf, SparkContext}
 
@@ -22,6 +22,7 @@ object weatherQueryTool extends App {
   val weatherFilesDirectory: String = "src/main/resources/weather_data/"
   val resultsDirectory: String = "src/main/resources/results/"
   val txtExtension = ".txt"
+  val logger = LogFactory.getLog(this.getClass.getName)
 
   //manually list out locations which are being queried
   val locations: List[String] = List("aberporth", "armagh", "ballypatrick", "bradford",
@@ -32,30 +33,36 @@ object weatherQueryTool extends App {
 
   //download data from the internet and parse into Spark RDD
   downloadWeatherFiles(locations, weatherFilesDirectory)
+  logger.info("All downloads complete")
   val data = createSparkRDD(locations)
+  logger.info("RDD Created")
 
   //create results directory
   val resultsDir = new java.io.File(resultsDirectory)
   if (!resultsDir.exists()) resultsDir.mkdirs
 
+  logger.info("Running query 1")
   //Query 1: Amount of time each station has been/ was online for
   val file1 = new File(resultsDirectory + "query1.txt")
   val bw1 = new BufferedWriter(new FileWriter(file1))
   queryOne(data).foreach(pair => bw1.write(pair._1 + " " + pair._2 + " years\n"))
   bw1.close()
 
+  logger.info("Running query 2")
   //Query 2: Total rainfall in one location
   val file2 = new File(resultsDirectory + "query2.txt")
   val bw2 = new BufferedWriter(new FileWriter(file2))
   queryTwo(data).foreach(pair => bw2.write(pair._1 + " got " + pair._2.getOrElse(0.0) + " cm rain\n"))
   bw2.close()
 
+  logger.info("Running query 3")
   //Query 3: Month and year in which each location got max rainfall
   val file3 = new File(resultsDirectory + "query3.txt")
   val bw3 = new BufferedWriter(new FileWriter(file3))
   queryThree(data).foreach(pair => bw3.write(pair._1 + " got " + pair._2._2 + " cm rainfall in " + pair._2._1 + "\n"))
   bw3.close()
 
+  logger.info("Running query 4")
   //Query 4: Average of stats in May across all locations - done for sunshine hours, can be changed
   val file4 = new File(resultsDirectory + "query4.txt")
   val bw4 = new BufferedWriter(new FileWriter(file4))
@@ -66,6 +73,7 @@ object weatherQueryTool extends App {
   def downloadWeatherFiles(locations: List[String], destination: String, fileExtension: String = txtExtension) = {
     new java.io.File(destination).mkdirs
     locations.map(location => {
+      logger.info("Downloading file for " + location)
       val url = new URL("https://www.metoffice.gov.uk/pub/data/weather/uk/climate/stationdata/" + location + "data" + fileExtension)
       val connection = url.openConnection().asInstanceOf[HttpURLConnection]
       connection.setRequestMethod("GET")
@@ -89,7 +97,9 @@ object weatherQueryTool extends App {
   }
 
   def cleanAndTokenizeEntry(uncleanEntry: String) : List[String] ={
-    uncleanEntry.trim.split(" ").toList.map(_.trim).filter(_ != "").map(_.replaceAll("(\\*|\\$|#)", "")).map(_.replace("Provisional", ""))
+    val tokens = uncleanEntry.trim.split(" ").toList.map(_.trim).filter(_ != "").map(_.replaceAll("(\\*|\\$|#)", "")).map(_.replace("Provisional", ""))
+    if (tokens.length < 7) logger.warn("Found malformed record = " + uncleanEntry)
+    tokens
   }
 
   def toWeatherInstance(fileName: String, weatherData: List[String], dtf: DateTimeFormatter = dtf) : weatherInstance = {
@@ -108,28 +118,22 @@ object weatherQueryTool extends App {
       if (number == "---") None else Some(number.toDouble)
     } catch {
       case error: NumberFormatException => {
+        logger.warn("Found invalid number = " + number)
         None
       }
       case error: Exception => {
-        error.printStackTrace()
+        logger.error(error.printStackTrace())
         throw error
       }
     }
   }
 
   def createSparkRDD(locations: List[String], weatherFilesDirectory: String = weatherFilesDirectory, dtf: DateTimeFormatter = dtf, sc: SparkContext = sc) : RDD[weatherInstance] = {
-    //create spark dataset
     sc.parallelize(
       locations.map(location => (location,getFileAndRemoveHeader(weatherFilesDirectory, location))) //retrieves the location file, and removes header lines
         .flatMap(locationAndWeatherData => locationAndWeatherData._2.map(record => cleanAndTokenizeEntry(record)) //returns tokenized, cleaned records along with the station name
-        .filter(dataInstance => dataInstance.length > 5) //filters out malformed data instances but not incomplete
+        .filter(dataInstance => dataInstance.length > 5) //filters out malformed data instances but not incomplete records
         .map(cleanedRecord => toWeatherInstance(locationAndWeatherData._1,cleanedRecord, dtf)))) //returns a RDD of weather instances
-  }
-
-  def createResultFile(directory: String, queryName: String) : File = {
-    val resultsDir = new java.io.File(directory)
-    if (!resultsDir.exists()) resultsDir.mkdirs
-    new File(directory + queryName + txtExtension)
   }
 
   def queryOne(data: RDD[weatherInstance]) : RDD[(String, Long)] = {
