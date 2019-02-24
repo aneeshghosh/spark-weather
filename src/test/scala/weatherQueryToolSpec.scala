@@ -27,7 +27,7 @@ class weatherQueryToolSpec extends org.scalatest.FlatSpec {
   }
 
   "A file" should "be parsed correctly" in {
-    val cleanedFileLines = weatherQueryTool.getFileAndRemoveHeader(destination, location.head)
+    val cleanedFileLines = weatherQueryTool.getFileAndRemoveHeader(destination, location.head, txtExtension)
     val oxfordFile = new File(destination + "oxford.txt")
     assert(cleanedFileLines.size >= 1993)
     assert(cleanedFileLines.head.trim == "1853   1    8.4     2.7       4    62.8     ---")
@@ -46,9 +46,10 @@ class weatherQueryToolSpec extends org.scalatest.FlatSpec {
     assert(weatherInstance.weatherStats.afDays.isEmpty)
   }
 
+  //The test values are as of Feb-2019 this may change in the future based on weather records based on source
   "A RDD" should "be created from the file and queried" in {
     //create RDD
-    val RDD = weatherQueryTool.createSparkRDD(location, destination, dtf, sc)
+    val RDD = weatherQueryTool.createSparkRDD(location, destination, dtf, sc, txtExtension)
     assert(RDD.count() == 1993)
 
     //query 1

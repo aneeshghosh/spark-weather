@@ -32,6 +32,7 @@ object weatherQueryTool extends App {
     "tiree", "valley", "waddington", "whitby", "wickairport", "yeovilton")
 
   //download data from the internet and parse into Spark RDD
+  logger.info("Starting downloads to directory - " + weatherFilesDirectory)
   downloadWeatherFiles(locations, weatherFilesDirectory)
   logger.info("All downloads complete")
   val data = createSparkRDD(locations)
@@ -41,28 +42,28 @@ object weatherQueryTool extends App {
   val resultsDir = new java.io.File(resultsDirectory)
   if (!resultsDir.exists()) resultsDir.mkdirs
 
-  logger.info("Running query 1")
+  logger.info("Running query 1 - Amount of time each station has been/ was online for")
   //Query 1: Amount of time each station has been/ was online for
   val file1 = new File(resultsDirectory + "query1.txt")
   val bw1 = new BufferedWriter(new FileWriter(file1))
   queryOne(data).foreach(pair => bw1.write(pair._1 + " " + pair._2 + " years\n"))
   bw1.close()
 
-  logger.info("Running query 2")
-  //Query 2: Total rainfall in one location
+  logger.info("Running query 2 - Total rainfall in one location")
+  //Query 2: Total rainfall in one location  - stat can be changed
   val file2 = new File(resultsDirectory + "query2.txt")
   val bw2 = new BufferedWriter(new FileWriter(file2))
   queryTwo(data).foreach(pair => bw2.write(pair._1 + " got " + pair._2.getOrElse(0.0) + " cm rain\n"))
   bw2.close()
 
-  logger.info("Running query 3")
-  //Query 3: Month and year in which each location got max rainfall
+  logger.info("Running query 3 - Month and year in which each location got max rainfall")
+  //Query 3: Month and year in which each location got max rainfall - stat can be changed
   val file3 = new File(resultsDirectory + "query3.txt")
   val bw3 = new BufferedWriter(new FileWriter(file3))
   queryThree(data).foreach(pair => bw3.write(pair._1 + " got " + pair._2._2 + " cm rainfall in " + pair._2._1 + "\n"))
   bw3.close()
 
-  logger.info("Running query 4")
+  logger.info("Running query 4 - Average of stats in May across all locations")
   //Query 4: Average of stats in May across all locations - done for sunshine hours, can be changed
   val file4 = new File(resultsDirectory + "query4.txt")
   val bw4 = new BufferedWriter(new FileWriter(file4))
@@ -73,7 +74,6 @@ object weatherQueryTool extends App {
   def downloadWeatherFiles(locations: List[String], destination: String, fileExtension: String = txtExtension) = {
     new java.io.File(destination).mkdirs
     locations.map(location => {
-      logger.info("Downloading file for " + location)
       val url = new URL("https://www.metoffice.gov.uk/pub/data/weather/uk/climate/stationdata/" + location + "data" + fileExtension)
       val connection = url.openConnection().asInstanceOf[HttpURLConnection]
       connection.setRequestMethod("GET")
@@ -87,7 +87,7 @@ object weatherQueryTool extends App {
     })
   }
 
-  def getFileAndRemoveHeader(weatherFilesDirectory: String, location: String) : List[String] = {
+  def getFileAndRemoveHeader(weatherFilesDirectory: String, location: String, txtExtension: String = txtExtension) : List[String] = {
     var index = 0
     val lines = scala.io.Source.fromFile(weatherFilesDirectory + location + txtExtension).getLines.toList
       while(!lines(index).trim.startsWith("yyyy")){
@@ -128,9 +128,9 @@ object weatherQueryTool extends App {
     }
   }
 
-  def createSparkRDD(locations: List[String], weatherFilesDirectory: String = weatherFilesDirectory, dtf: DateTimeFormatter = dtf, sc: SparkContext = sc) : RDD[weatherInstance] = {
+  def createSparkRDD(locations: List[String], weatherFilesDirectory: String = weatherFilesDirectory, dtf: DateTimeFormatter = dtf, sc: SparkContext = sc, fileExtension: String = txtExtension) : RDD[weatherInstance] = {
     sc.parallelize(
-      locations.map(location => (location,getFileAndRemoveHeader(weatherFilesDirectory, location))) //retrieves the location file, and removes header lines
+      locations.map(location => (location,getFileAndRemoveHeader(weatherFilesDirectory, location, fileExtension))) //retrieves the location file, and removes header lines
         .flatMap(locationAndWeatherData => locationAndWeatherData._2.map(record => cleanAndTokenizeEntry(record)) //returns tokenized, cleaned records along with the station name
         .filter(dataInstance => dataInstance.length > 5) //filters out malformed data instances but not incomplete records
         .map(cleanedRecord => toWeatherInstance(locationAndWeatherData._1,cleanedRecord, dtf)))) //returns a RDD of weather instances
@@ -139,24 +139,25 @@ object weatherQueryTool extends App {
   def queryOne(data: RDD[weatherInstance]) : RDD[(String, Long)] = {
     data.groupBy(_.location)
       .map(entry => (entry._1, entry._2.minBy(_.yearMonth).yearMonth.until(entry._2.maxBy(_.yearMonth.getYear).yearMonth, ChronoUnit.YEARS)))
-      .sortBy(-_._2)
+      .sortBy(-_._2) //inverse sort
   }
 
   def queryTwo(data: RDD[weatherInstance]) : RDD[(String, Option[Double])] = {
     data.map(entry => (entry.location, entry.weatherStats.rain))
       .reduceByKey((a,b) => Some(a.getOrElse(0.0) + b.getOrElse(0.0)))
-      .sortBy(-_._2.get)
+      .sortBy(-_._2.get) //inverse sort
   }
 
   def queryThree(data: RDD[weatherInstance]) : RDD[(String, (YearMonth, Double))] = {
     data.map(entry => (entry.location, (entry.yearMonth, entry.weatherStats.rain.getOrElse(0.0))))
-      .reduceByKey{case ((a,b),(c,d)) => (if (math.max(b,d) == b) a else c,math.max(b,d))}
+      .reduceByKey{case ((a,b),(c,d)) => (if (math.max(b,d) == b) a else c,math.max(b,d))} //find Max of values
   }
 
   def queryFour(data: RDD[weatherInstance]): RDD[(Int, Double)] = {
     data.filter(_.yearMonth.getMonthValue == 5) //Filter out May records
       .map(entry => (entry.yearMonth.getYear(), (entry.weatherStats.sunHours.getOrElse(0.0), if (entry.weatherStats.sunHours.isDefined) 1 else 0)))
       .reduceByKey{case ((a,b),(c,d)) => (a+c, b+d)}
+      .filter(_._2._2 != 0) //Filter out 0 records to avoid division by zero
       .map(value => (value._1, value._2._1/value._2._2))
       .sortBy(-_._2)
   }
